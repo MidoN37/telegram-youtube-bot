@@ -8,8 +8,7 @@
   },
   "dependencies": {
     "telegraf": "^4.16.3",
-    "ytdl-core": "^4.11.5",
-    "fluent-ffmpeg": "^2.1.2"
+    "@distube/ytdl-core": "^4.14.4"
   },
   "engines": {
     "node": ">=18.0.0"
