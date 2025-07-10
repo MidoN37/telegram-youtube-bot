@@ -6,16 +6,26 @@ const express = require('express');
 // --- SETUP ---
 const token = process.env.BOT_TOKEN;
 const port = process.env.PORT || 3000;
-// This is the public URL of your Railway deployment.
-// Railway sets this environment variable for you.
-const url = process.env.RAILWAY_STATIC_URL || 'YOUR_PUBLIC_URL'; 
+// Use the dedicated PUBLIC_URL environment variable we just set
+const url = process.env.PUBLIC_URL;
+
+if (!token || !url) {
+    console.error('CRITICAL ERROR: BOT_TOKEN and PUBLIC_URL must be set in Railway variables.');
+    process.exit(1);
+}
 
 const bot = new TelegramBot(token);
 
-// Set the webhook
-bot.setWebHook(`https://${url}/bot${token}`);
+// Set the webhook with better logging
+bot.setWebHook(`https://${url}/bot${token}`).then(() => {
+    console.log(`✅ Webhook has been set successfully to https://${url}`);
+}).catch((error) => {
+    // This will now give a much clearer error message if something is wrong with the URL
+    console.error('Error setting webhook:', error.message);
+    process.exit(1);
+});
 
-console.log('Bot has been started with webhooks...');
+console.log('🤖 Bot server has been started and is waiting for webhook confirmation...');
 
 const app = express();
 app.use(express.json());
@@ -26,12 +36,11 @@ app.post(`/bot${token}`, (req, res) => {
     res.sendStatus(200);
 });
 
-// --- COMMANDS & MAIN LOGIC (mostly the same) ---
+// --- COMMANDS & MAIN LOGIC (remains the same) ---
 
 bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
     const userFirstName = msg.from.first_name;
-
     const welcomeMessage = `
 👋 Hello, ${userFirstName}! I'm your friendly YouTube Downloader Bot. 🤖
 
@@ -43,7 +52,6 @@ Just send me a YouTube link, and I'll help you download the video or audio. Let'
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const messageText = msg.text;
-
     if (messageText.startsWith('/')) {
         return;
     }
@@ -51,11 +59,9 @@ bot.on('message', async (msg) => {
     if (ytdl.validateURL(messageText)) {
         try {
             bot.sendMessage(chatId, '🔎 Amazing! Let me check that link for you...');
-            
             const videoId = ytdl.getVideoID(messageText);
             const info = await ytdl.getInfo(videoId);
             const title = info.videoDetails.title;
-
             bot.sendPhoto(chatId, `https://img.youtube.com/vi/${videoId}/0.jpg`, {
                 caption: `🎬 **${title}**\n\nWhat format would you like? 🤔`,
                 parse_mode: 'Markdown',
@@ -74,7 +80,6 @@ bot.on('message', async (msg) => {
     }
 });
 
-// Callback query handling remains the same...
 bot.on('callback_query', async (callbackQuery) => {
     const chatId = callbackQuery.message.chat.id;
     const [choice, videoId] = callbackQuery.data.split('_');
@@ -87,7 +92,7 @@ bot.on('callback_query', async (callbackQuery) => {
         try {
             bot.sendMessage(chatId, '🎧 Great choice! Downloading the best audio quality now. Please wait...');
             const audioStream = ytdl(videoId, { filter: 'audioonly', quality: 'highestaudio' });
-            const filePath = `/tmp/${videoId}_audio.mp3`; // Use /tmp for temp files in serverless environments
+            const filePath = `/tmp/${videoId}_audio.mp3`;
             const writeStream = fs.createWriteStream(filePath);
 
             audioStream.pipe(writeStream);
@@ -96,7 +101,6 @@ bot.on('callback_query', async (callbackQuery) => {
                     fs.unlinkSync(filePath);
                 });
             });
-
         } catch (error) {
             console.error(error);
             bot.sendMessage(chatId, '😔 An error occurred while downloading the audio. Please try again.');
@@ -115,12 +119,12 @@ bot.on('callback_query', async (callbackQuery) => {
             console.error(error);
             bot.sendMessage(chatId, '😔 Sorry, I couldn\'t fetch the video formats. Please try another video.');
         }
-    } else if (choice === 'download') {
-        const [, videoId, itag] = callbackQuery.data.split('_');
+    } else if (choice.startsWith('download')) {
+        const [, vId, itag] = callbackQuery.data.split('_');
         try {
             bot.sendMessage(chatId, '📥 Perfect! Your video is downloading now. This might take a moment...');
-            const videoStream = ytdl(videoId, { filter: format => format.itag == itag });
-            const filePath = `/tmp/${videoId}_video.mp4`; // Use /tmp
+            const videoStream = ytdl(vId, { filter: format => format.itag == itag });
+            const filePath = `/tmp/${vId}_video.mp4`;
             const writeStream = fs.createWriteStream(filePath);
             videoStream.pipe(writeStream);
             writeStream.on('finish', () => {
@@ -135,8 +139,6 @@ bot.on('callback_query', async (callbackQuery) => {
     }
 });
 
-
-// Start the server
 app.listen(port, () => {
     console.log(`Server is listening on port ${port}`);
 });
