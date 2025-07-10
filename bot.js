@@ -1,9 +1,8 @@
 const { Telegraf } = require('telegraf');
-const ytdl = require('ytdl-core');
+const ytdl = require('@distube/ytdl-core');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const ffmpeg = require('fluent-ffmpeg');
 
 // Initialize the Telegraf bot with the token from environment variables
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -65,35 +64,53 @@ bot.on('callback_query', async (ctx) => {
     await ctx.reply(`Starting the download for your ${format}. This may take a moment...`);
     
     try {
-        // Get video info
+        // Get video info first to check if it's available
         const info = await ytdl.getInfo(url);
-        const title = info.videoDetails.title.replace(/[^\w\s]/gi, ''); // Clean filename
+        const title = info.videoDetails.title.replace(/[^\w\s-]/gi, '').substring(0, 50); // Clean and limit filename
+        
+        // Check video duration (limit to 10 minutes to avoid large files)
+        const duration = parseInt(info.videoDetails.lengthSeconds);
+        if (duration > 600) { // 10 minutes
+            userUrl.delete(chatId);
+            return ctx.reply('Sorry, the video is too long (>10 minutes). Please try a shorter video.');
+        }
         
         // Define a temporary path to save the file
         const tempDir = os.tmpdir();
         const timestamp = Date.now();
+        const sanitizedTitle = title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
         
         if (format === 'video') {
-            const filePath = path.join(tempDir, `${timestamp}.mp4`);
+            const filePath = path.join(tempDir, `${sanitizedTitle}_${timestamp}.mp4`);
             
-            // Download video in mp4 format
+            // Download video - use lower quality to avoid issues
             const stream = ytdl(url, {
-                quality: 'highest',
-                filter: format => format.container === 'mp4'
+                quality: 'lowest',
+                filter: format => format.container === 'mp4' && format.hasVideo && format.hasAudio
             });
             
             const writeStream = fs.createWriteStream(filePath);
+            
             stream.pipe(writeStream);
             
             stream.on('end', async () => {
                 try {
-                    // Check file size (Telegram has a 50MB limit)
+                    // Check if file exists and has content
+                    if (!fs.existsSync(filePath)) {
+                        return ctx.reply('Sorry, failed to download the video.');
+                    }
+                    
                     const stats = fs.statSync(filePath);
                     const fileSizeInMB = stats.size / (1024 * 1024);
                     
                     if (fileSizeInMB > 50) {
                         fs.unlinkSync(filePath);
-                        return ctx.reply('Sorry, the video file is too large (>50MB). Telegram has a file size limit.');
+                        return ctx.reply('Sorry, the video file is too large (>50MB). Try a shorter video.');
+                    }
+                    
+                    if (fileSizeInMB < 0.1) {
+                        fs.unlinkSync(filePath);
+                        return ctx.reply('Sorry, the video file seems to be empty or corrupted.');
                     }
                     
                     await ctx.replyWithVideo({ source: filePath });
@@ -102,78 +119,88 @@ bot.on('callback_query', async (ctx) => {
                 } catch (error) {
                     console.error('Error sending video:', error);
                     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-                    ctx.reply('Sorry, something went wrong while sending the video.');
+                    ctx.reply('Sorry, failed to send the video. The file might be corrupted.');
                 }
             });
             
             stream.on('error', (error) => {
-                console.error('Download error:', error);
+                console.error('Video download error:', error);
                 if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-                ctx.reply('Sorry, something went wrong during download.');
+                ctx.reply('Sorry, failed to download the video. It might be restricted or unavailable.');
             });
             
         } else {
             // Audio download
-            const filePath = path.join(tempDir, `${timestamp}.mp3`);
-            const tempAudioPath = path.join(tempDir, `${timestamp}_temp.mp4`);
+            const filePath = path.join(tempDir, `${sanitizedTitle}_${timestamp}.mp3`);
             
-            // Download audio stream
+            // Download audio only
             const stream = ytdl(url, {
-                quality: 'highestaudio',
+                quality: 'lowestaudio',
                 filter: 'audioonly'
             });
             
-            const writeStream = fs.createWriteStream(tempAudioPath);
+            const writeStream = fs.createWriteStream(filePath);
             stream.pipe(writeStream);
             
-            stream.on('end', () => {
-                // Convert to mp3 using ffmpeg
-                ffmpeg(tempAudioPath)
-                    .toFormat('mp3')
-                    .on('end', async () => {
-                        try {
-                            // Check file size
-                            const stats = fs.statSync(filePath);
-                            const fileSizeInMB = stats.size / (1024 * 1024);
-                            
-                            if (fileSizeInMB > 50) {
-                                fs.unlinkSync(filePath);
-                                fs.unlinkSync(tempAudioPath);
-                                return ctx.reply('Sorry, the audio file is too large (>50MB). Telegram has a file size limit.');
-                            }
-                            
-                            await ctx.replyWithAudio({ source: filePath });
-                            fs.unlinkSync(filePath);
-                            fs.unlinkSync(tempAudioPath);
-                            userUrl.delete(chatId);
-                        } catch (error) {
-                            console.error('Error sending audio:', error);
-                            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-                            if (fs.existsSync(tempAudioPath)) fs.unlinkSync(tempAudioPath);
-                            ctx.reply('Sorry, something went wrong while sending the audio.');
-                        }
-                    })
-                    .on('error', (error) => {
-                        console.error('FFmpeg error:', error);
-                        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-                        if (fs.existsSync(tempAudioPath)) fs.unlinkSync(tempAudioPath);
-                        ctx.reply('Sorry, something went wrong during audio conversion.');
-                    })
-                    .save(filePath);
+            stream.on('end', async () => {
+                try {
+                    // Check if file exists and has content
+                    if (!fs.existsSync(filePath)) {
+                        return ctx.reply('Sorry, failed to download the audio.');
+                    }
+                    
+                    const stats = fs.statSync(filePath);
+                    const fileSizeInMB = stats.size / (1024 * 1024);
+                    
+                    if (fileSizeInMB > 50) {
+                        fs.unlinkSync(filePath);
+                        return ctx.reply('Sorry, the audio file is too large (>50MB). Try a shorter video.');
+                    }
+                    
+                    if (fileSizeInMB < 0.01) {
+                        fs.unlinkSync(filePath);
+                        return ctx.reply('Sorry, the audio file seems to be empty or corrupted.');
+                    }
+                    
+                    await ctx.replyWithAudio({ source: filePath });
+                    fs.unlinkSync(filePath);
+                    userUrl.delete(chatId);
+                } catch (error) {
+                    console.error('Error sending audio:', error);
+                    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+                    ctx.reply('Sorry, failed to send the audio. The file might be corrupted.');
+                }
             });
             
             stream.on('error', (error) => {
-                console.error('Download error:', error);
-                if (fs.existsSync(tempAudioPath)) fs.unlinkSync(tempAudioPath);
-                ctx.reply('Sorry, something went wrong during download.');
+                console.error('Audio download error:', error);
+                if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+                ctx.reply('Sorry, failed to download the audio. It might be restricted or unavailable.');
             });
         }
         
     } catch (error) {
         console.error('Full error details:', error);
-        ctx.reply('Sorry, something went wrong. The video might be private, restricted, or unavailable.');
+        
+        // Handle specific error types
+        if (error.statusCode === 410) {
+            ctx.reply('Sorry, this video is no longer available or has been removed.');
+        } else if (error.statusCode === 403) {
+            ctx.reply('Sorry, this video is private or restricted.');
+        } else if (error.message && error.message.includes('Video unavailable')) {
+            ctx.reply('Sorry, this video is unavailable in your region or has been removed.');
+        } else {
+            ctx.reply('Sorry, something went wrong. The video might be private, restricted, or temporarily unavailable.');
+        }
+        
         userUrl.delete(chatId);
     }
+});
+
+// Error handling for the bot
+bot.catch((err, ctx) => {
+    console.error('Bot error:', err);
+    ctx.reply('Sorry, an unexpected error occurred. Please try again.');
 });
 
 // Start the bot using polling
