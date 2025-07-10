@@ -1,5 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
-const ytdl = require('ytdl-core');
+const play = require('play-dl');
 const fs = require('fs');
 const express = require('express');
 
@@ -12,17 +12,6 @@ if (!token || !url) {
     console.error('CRITICAL ERROR: BOT_TOKEN and PUBLIC_URL must be set in Railway variables.');
     process.exit(1);
 }
-
-// ** THE FIX IS HERE **
-// Make requests look like they are coming from a browser to avoid YouTube's 410 error.
-const ytdlOptions = {
-    requestOptions: {
-        headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-        },
-    },
-};
-
 
 const bot = new TelegramBot(token);
 
@@ -43,6 +32,7 @@ app.post(`/bot${token}`, (req, res) => {
     res.sendStatus(200);
 });
 
+
 // --- COMMANDS & MAIN LOGIC ---
 
 bot.onText(/\/start/, (msg) => {
@@ -61,89 +51,79 @@ bot.on('message', async (msg) => {
     const messageText = msg.text;
     if (messageText.startsWith('/')) { return; }
 
-    if (ytdl.validateURL(messageText)) {
+    // Use play-dl's validation method
+    const validationResult = await play.validate(messageText);
+    if (validationResult === 'yt_video') {
         try {
-            bot.sendMessage(chatId, '🔎 Amazing! Let me check that link for you...');
-            const videoId = await ytdl.getVideoID(messageText);
-            // ** APPLYING THE FIX **
-            const info = await ytdl.getInfo(videoId, ytdlOptions);
-            const title = info.videoDetails.title;
-            bot.sendPhoto(chatId, `https://img.youtube.com/vi/${videoId}/0.jpg`, {
+            await bot.sendMessage(chatId, '🔎 Amazing! Let me check that link for you...');
+            
+            // Use play-dl's video_info method
+            const videoInfo = await play.video_info(messageText);
+            const title = videoInfo.video_details.title;
+
+            await bot.sendPhoto(chatId, videoInfo.video_details.thumbnails[0].url, {
                 caption: `🎬 **${title}**\n\nWhat format would you like? 🤔`,
                 parse_mode: 'Markdown',
                 reply_markup: {
                     inline_keyboard: [
-                        [{ text: '📹 Video', callback_data: `video_${videoId}` }, { text: '🎵 Audio', callback_data: `audio_${videoId}` }]
+                        [{ text: '📹 Video', callback_data: `video_${videoInfo.video_details.id}` }, { text: '🎵 Audio', callback_data: `audio_${videoInfo.video_details.id}` }]
                     ]
                 }
             });
         } catch (error) {
-            console.error("Error getting video info:", error);
-            bot.sendMessage(chatId, '😔 Oops! Something went wrong. This video might be private, age-restricted, or have other restrictions. Please try another one!');
+            console.error("Error in message handler:", error.message);
+            await bot.sendMessage(chatId, '😔 Oops! Something went wrong. This video might be private, age-restricted, or have other restrictions. Please try another one!');
         }
     } else {
-        bot.sendMessage(chatId, 'Hmm, that doesn\'t look like a YouTube link. Please send me a valid one! 👀');
+        await bot.sendMessage(chatId, 'Hmm, that doesn\'t look like a YouTube link. Please send me a valid one! 👀');
     }
 });
 
+
 bot.on('callback_query', async (callbackQuery) => {
     const chatId = callbackQuery.message.chat.id;
-    const [choice, videoId] = callbackQuery.data.split('_');
     const messageId = callbackQuery.message.message_id;
+    const [choice, videoId] = callbackQuery.data.split('_');
 
-    bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId });
-    bot.answerCallbackQuery(callbackQuery.id);
+    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId });
+    await bot.answerCallbackQuery(callbackQuery.id);
+    
+    const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-    if (choice === 'audio') {
-        try {
-            bot.sendMessage(chatId, '🎧 Great choice! Downloading the best audio quality now. Please wait...');
-            // ** APPLYING THE FIX **
-            const audioStream = ytdl(videoId, { ...ytdlOptions, filter: 'audioonly', quality: 'highestaudio' });
-            const filePath = `/tmp/${videoId}_audio.mp3`;
-            const writeStream = fs.createWriteStream(filePath);
-            audioStream.pipe(writeStream);
-            writeStream.on('finish', () => {
-                bot.sendAudio(chatId, filePath).then(() => {
-                    fs.unlinkSync(filePath);
-                });
+    try {
+        if (choice === 'audio') {
+            await bot.sendMessage(chatId, '🎧 Great choice! Downloading the best audio quality now. Please wait...');
+            const stream = await play.stream(youtubeUrl, {
+                quality: 2 // 'best' quality for audio
             });
-        } catch (error) {
-            console.error("Error downloading audio:", error);
-            bot.sendMessage(chatId, '😔 An error occurred while downloading the audio. Please try again.');
-        }
-    } else if (choice === 'video') {
-        try {
-            // ** APPLYING THE FIX **
-            const info = await ytdl.getInfo(videoId, ytdlOptions);
-            const videoFormats = info.formats
-                .filter(format => format.hasVideo && format.hasAudio && format.container === 'mp4' && format.qualityLabel)
+            await bot.sendAudio(chatId, stream.stream, { fileName: `${videoId}_audio.mp3` }, { contentType: 'audio/mpeg' });
+
+        } else if (choice === 'video') {
+            const videoInfo = await play.video_info(youtubeUrl);
+            const videoFormats = videoInfo.format
+                .filter(format => format.qualityLabel && format.mime_type.includes('mp4') && format.audio_channels)
                 .sort((a, b) => b.height - a.height)
-                .map(format => ({ text: `${format.qualityLabel}`, callback_data: `download_${videoId}_${format.itag}` }));
-            bot.sendMessage(chatId, '✅ Awesome! Now, which quality would you like for the video?', {
-                reply_markup: { inline_keyboard: [videoFormats.map(f => ({text: f.text, callback_data: f.callback_data}))] }
+                .map(format => ({
+                    text: `${format.qualityLabel}`,
+                    callback_data: `download_${videoId}_${format.itag}`
+                }));
+
+            await bot.sendMessage(chatId, '✅ Awesome! Now, which quality would you like for the video?', {
+                reply_markup: { inline_keyboard: [videoFormats] }
             });
-        } catch (error) {
-            console.error("Error getting video formats:", error);
-            bot.sendMessage(chatId, '😔 Sorry, I couldn\'t fetch the video formats. Please try another video.');
-        }
-    } else if (choice === 'download') {
-        const [, vId, itag] = callbackQuery.data.split('_');
-        try {
-            bot.sendMessage(chatId, '📥 Perfect! Your video is downloading now. This might take a moment...');
-            // ** APPLYING THE FIX **
-            const videoStream = ytdl(vId, { ...ytdlOptions, filter: format => format.itag == itag });
-            const filePath = `/tmp/${vId}_video.mp4`;
-            const writeStream = fs.createWriteStream(filePath);
-            videoStream.pipe(writeStream);
-            writeStream.on('finish', () => {
-                bot.sendVideo(chatId, filePath).then(() => {
-                    fs.unlinkSync(filePath);
-                });
+
+        } else if (choice === 'download') {
+            await bot.sendMessage(chatId, '📥 Perfect! Your video is downloading now. This might take a moment...');
+            const [, , itag] = callbackQuery.data.split('_'); // [download, videoId, itag]
+            
+            const stream = await play.stream(youtubeUrl, {
+                quality: parseInt(itag, 10) // download by specific itag
             });
-        } catch (error) {
-            console.error("Error downloading video:", error);
-            bot.sendMessage(chatId, '😔 There was an issue downloading the video in that quality. Please try another one.');
+            await bot.sendVideo(chatId, stream.stream, {}, { contentType: stream.type });
         }
+    } catch (error) {
+        console.error(`Error processing callback: ${choice}`, error.message);
+        await bot.sendMessage(chatId, '😔 A critical error occurred. I could not process this request. Please try again with a different link.');
     }
 });
 
