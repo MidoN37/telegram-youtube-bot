@@ -10,6 +10,26 @@ const ytDlpWrap = new YtDlpWrap();
 // Initialize the Telegraf bot with the token from environment variables
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
+// Flag to track if binary is initialized
+let binaryInitialized = false;
+
+// Initialize the yt-dlp binary
+const initBinary = async () => {
+  if (binaryInitialized) return;
+  
+  try {
+    console.log('Downloading yt-dlp binary...');
+    const binaryPath = './yt-dlp';
+    await YtDlpWrap.downloadFromGithub(binaryPath);
+    ytDlpWrap.setBinaryPath(binaryPath);
+    binaryInitialized = true;
+    console.log('yt-dlp binary initialized successfully');
+  } catch (error) {
+    console.error('Failed to download yt-dlp binary:', error);
+    throw error;
+  }
+};
+
 // Use a Map to temporarily store the YouTube URL for each user
 const userUrl = new Map();
 
@@ -57,6 +77,9 @@ bot.on('callback_query', async (ctx) => {
   await ctx.reply(`Starting the download for your ${format}. This may take a moment...`);
   
   try {
+    // Initialize binary if not already done
+    await initBinary();
+    
     // Define a temporary path to save the file
     const tempDir = os.tmpdir();
     const filePath = path.join(tempDir, `${Date.now()}.${format === 'video' ? 'mp4' : 'mp3'}`);
@@ -89,7 +112,7 @@ bot.on('callback_query', async (ctx) => {
     userUrl.delete(chatId);
     
   } catch (error) {
-    console.error(error);
+    console.error('Full error details:', error);
     ctx.reply('Sorry, something went wrong. The video might be too long, private, or copyrighted, which prevents downloading.');
   }
 });
